@@ -27,6 +27,8 @@ mod commands;
 mod context;
 mod dictation_experience;
 mod dictation_field;
+#[cfg(target_os = "linux")]
+mod linux_chrome;
 mod palette_dispatch;
 mod pty;
 mod recording_audio;
@@ -379,7 +381,11 @@ pub(crate) fn show_main_window(app: &tauri::AppHandle) {
         // overlay chrome; the in-app brand mark carries the identity.
         // Linux/Windows: the native title bar, task switcher and dock all
         // show this string, so it must be the app name.
-        .title(if cfg!(target_os = "macos") { "" } else { "Minutes" })
+        .title(if cfg!(target_os = "macos") {
+            ""
+        } else {
+            "Minutes"
+        })
         // 560px was sized for a single list pane. Chat expands to half the
         // window and a document opens beside it; three panes need ~820px just
         // to reach their minimums and stop fighting near 1000. First launch
@@ -1174,6 +1180,7 @@ async fn check_for_update(app: &tauri::AppHandle, manual: bool) {
     notify_update_available(app, &version, &body, download_bytes);
 }
 
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     // Labels + submenu titles go through `tr()` (the process locale is set at
     // the start of `main()`). This menu is cross-platform: the `app_menu`
@@ -1723,6 +1730,10 @@ fn spawn_meetings_refresh_watcher(app: &tauri::AppHandle, output_dir: std::path:
 }
 
 fn main() {
+    // Before anything that could touch GTK, and before any thread exists:
+    // the frame must be the desktop's stock one, not a macOS lookalike theme.
+    #[cfg(target_os = "linux")]
+    linux_chrome::pin_stock_gnome_theme();
     if let Some(code) = minutes_core::graph_worker::maybe_run_policy_projection_worker() {
         std::process::exit(code);
     }
@@ -1926,8 +1937,14 @@ fn main() {
     let countdown_terminal_state_for_detector = call_end_countdown_terminal_state.clone();
     let stop_for_detector = stop_flag.clone();
 
-    tauri::Builder::default()
-        .menu(build_app_menu)
+    let builder = tauri::Builder::default();
+    // macOS needs the application menu (Cmd+Q, Edit shortcuts) and Windows
+    // keeps its menu bar. GNOME applications carry no menu bar: every item
+    // here also lives in the tray menu, and the WebView handles the Edit
+    // shortcuts itself, so on Linux the window shows content only.
+    #[cfg(not(target_os = "linux"))]
+    let builder = builder.menu(build_app_menu);
+    builder
         .on_menu_event(|app, event| match event.id().as_ref() {
             "app-show-about" => {
                 show_main_window(app);
