@@ -375,9 +375,11 @@ pub(crate) fn show_main_window(app: &tauri::AppHandle) {
         return;
     }
     let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-        // Empty title hides the centered "Minutes" text in any native chrome.
-        // The in-app brand mark (italic m + recording dot) carries the identity.
-        .title("")
+        // macOS: an empty title hides the centered "Minutes" text in the
+        // overlay chrome; the in-app brand mark carries the identity.
+        // Linux/Windows: the native title bar, task switcher and dock all
+        // show this string, so it must be the app name.
+        .title(if cfg!(target_os = "macos") { "" } else { "Minutes" })
         // 560px was sized for a single list pane. Chat expands to half the
         // window and a document opens beside it; three panes need ~820px just
         // to reach their minimums and stop fighting near 1000. First launch
