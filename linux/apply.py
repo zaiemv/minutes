@@ -5,6 +5,7 @@
 
 Upstream builds its Tauri desktop app for macOS and Windows only. Three changes make it a proper GNOME app:
 a real "Minutes" window title, a stock GNOME window frame (linux_chrome.rs), and no in-window menu bar.
+A fourth is taste: a neutral grey palette with a blue accent in place of upstream's warm one (PALETTE below).
 
 Each edit finds its place by what the code says, not by line number, so upstream moving things around does not
 break the build. An edit whose place is gone, or is there twice, stops the run with its name: fix it here.
@@ -57,3 +58,61 @@ edit("no menu bar on Linux", r"^([ \t]*)tauri::Builder::default\(\)\n\s*\.menu\(
 main.write_text(text)
 shutil.copy(here / "linux_chrome.rs", main.parent / "linux_chrome.rs")
 print("copied: linux_chrome.rs")
+
+
+# 5. the palette: upstream's is warm (cream and brown in light, olive-black and green in dark). This one is a
+#    neutral cool grey with a blue accent, in both appearances. Only the names below change; status colors
+#    (red, the green "live" dot, capture blue) stay upstream's. A translucent accent keeps upstream's opacity.
+PALETTE = {
+    "dark": {
+        "bg": "#1B1C20", "bg-elevated": "#232429", "bg-hover": "#2C2D33", "border-mid": "#34353C",
+        "text": "#F1F1F3", "text-secondary": "#A8AAB2", "text-tertiary": "#72747D",
+        "accent": "#4C8DF6", "accent-hover": "#6BA1F8",
+    },
+    "light": {
+        "bg": "#FAFAFB", "bg-elevated": "#F1F2F4", "bg-hover": "#E8E9EC",
+        "text": "#1B1C20", "text-secondary": "#5F626B", "text-tertiary": "#8A8D96",
+        "accent": "#2563EB", "accent-hover": "#1D4FD0",
+    },
+}
+ACCENT_ALPHA = re.compile(r"^(accent-(soft|tint|border)[a-z-]*|focus-ring[a-z-]*)$")
+WINDOWS = ["index.html", "note.html", "terminal.html", "meeting-prompt.html"]
+
+
+def recolor(path):
+    page = path.read_text()
+    out, pos, done = [], 0, []
+    # every rule that sets --bg is one appearance's palette
+    for bg in re.finditer(r"^[ \t]*--bg:\s*(#[0-9A-Fa-f]{6});", page, re.M):
+        start, end = page.rfind("{", 0, bg.start()), page.find("}", bg.end())
+        r, g, b = (int(bg.group(1)[i:i + 2], 16) for i in (1, 3, 5))
+        mode = "light" if (r + g + b) / 3 > 128 else "dark"
+        colors = PALETTE[mode]
+        ar, ag, ab = (int(colors["accent"][i:i + 2], 16) for i in (1, 3, 5))
+        seen = set()
+
+        def one(m):
+            name, value = m.group(2), m.group(4)
+            if name in colors:
+                seen.add(name)
+                return f"{m.group(1)}--{name}:{m.group(3)}{colors[name]};"
+            alpha = re.fullmatch(r"rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*([0-9.]+)\s*\)", value)
+            if ACCENT_ALPHA.match(name) and alpha:
+                return f"{m.group(1)}--{name}:{m.group(3)}rgba({ar}, {ag}, {ab}, {alpha.group(1)});"
+            return m.group(0)
+
+        block = re.sub(r"^([ \t]*)--([a-z-]+):(\s*)([^;]+);", one, page[start:end], flags=re.M)
+        missing = {"bg", "text", "accent"} - seen
+        if missing:
+            sys.exit(f"linux/apply.py: {path.name} ({mode}) has no --{', --'.join(sorted(missing))} to recolor")
+        out.append(page[pos:start] + block)
+        pos = end
+        done.append(mode)
+    if sorted(done) != ["dark", "light"]:
+        sys.exit(f"linux/apply.py: {path.name}: expected one dark and one light palette, found {done}")
+    path.write_text("".join(out) + page[pos:])
+    print(f"recolored: {path.name}")
+
+
+for name in WINDOWS:
+    recolor(src / "tauri/src" / name)

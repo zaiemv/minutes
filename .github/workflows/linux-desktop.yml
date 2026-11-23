@@ -165,7 +165,8 @@ jobs:
           Upstream ships the desktop app for macOS and Windows only; Linux gets the CLI. This is the same Tauri desktop app built for x86_64 Linux (Ubuntu 24.04, WebKitGTK 4.1), with:
           - a real "Minutes" window title,
           - a stock GNOME window frame (\`GTK_THEME\` pinned for the app's own process to adw-gtk3 / adw-gtk3-dark when installed, else Adwaita; an exported \`GTK_THEME\` still wins),
-          - no in-window menu bar; every item is in the tray menu.
+          - no in-window menu bar; every item is in the tray menu,
+          - a neutral grey palette with a blue accent in place of upstream's warm one.
 
           Asset: \`Minutes_${VERSION}_amd64.deb\` (package \`minutes\`, binary \`/usr/bin/minutes-app\`).
 
