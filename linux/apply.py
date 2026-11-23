@@ -116,3 +116,32 @@ def recolor(path):
 
 for name in WINDOWS:
     recolor(src / "tauri/src" / name)
+
+
+# 6. the same warm colors written out elsewhere (scrims behind dialogs, a few one-off rules, the small overlays,
+#    the accent the Settings color picker starts from): swapped wherever they appear, as hex or as an r, g, b triplet.
+LITERALS = {
+    "#0D0D0B": PALETTE["dark"]["bg"], "#141412": PALETTE["dark"]["bg-elevated"], "#1C1C1A": PALETTE["dark"]["bg-hover"],
+    "#F8F4ED": PALETTE["light"]["bg"], "#EFEBE2": PALETTE["light"]["bg-elevated"],
+    "#E8E2D8": PALETTE["light"]["bg-hover"], "#AE5337": PALETTE["light"]["accent"],
+    "#9E4428": PALETTE["light"]["accent-hover"],
+}
+
+
+def triplet(color):
+    return tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
+
+
+swapped = 0
+for path in sorted((src / "tauri/src").rglob("*")):
+    if path.suffix not in (".html", ".css", ".js") or "vendor" in path.parts:
+        continue
+    page = before = path.read_text()
+    for old, new in LITERALS.items():
+        page = re.sub(re.escape(old), new, page, flags=re.I)
+        (r, g, b), (nr, ng, nb) = triplet(old), triplet(new)
+        page = re.sub(rf"\b{r}\s*,\s*{g}\s*,\s*{b}\b", f"{nr}, {ng}, {nb}", page)
+    if page != before:
+        path.write_text(page)
+        swapped += 1
+print(f"swapped written-out warm colors in {swapped} more files")
