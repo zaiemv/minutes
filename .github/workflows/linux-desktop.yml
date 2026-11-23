@@ -1,0 +1,176 @@
+name: Linux desktop build
+
+# Upstream (silverstein/minutes) publishes its desktop app for macOS and Windows only. This builds the same app for
+# x86_64 Linux from each upstream release, with the changes in linux/, and publishes it here as v<version>-linux.<n>.
+# It checks for a new upstream release four times a day; a release that already has its Linux build is skipped.
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to build (empty: upstream's latest release)"
+        required: false
+        default: ""
+      revision:
+        description: "Fork build number (the n in -linux.n)"
+        required: false
+        default: "1"
+      publish:
+        description: "Publish the release (off: only keep the .deb as a run artifact)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: linux-desktop
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: silverstein/minutes
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  check:
+    name: Is there an upstream release without a Linux build?
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+      version: ${{ steps.pick.outputs.version }}
+      build: ${{ steps.pick.outputs.build }}
+    steps:
+      # GitHub switches a schedule off after 60 days without activity in the repository; this keeps it on
+      - name: Keep the schedule on
+        run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/linux-desktop.yml/enable" || true
+
+      - name: Pick the upstream release
+        id: pick
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-}"
+          [ -n "$tag" ] || tag=$(gh api "repos/${UPSTREAM}/releases/latest" --jq .tag_name)
+          case "$tag" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "::error::unexpected upstream tag '$tag'"; exit 1 ;; esac
+          version="${tag#v}-linux.${INPUT_REVISION:-1}"
+          build=true
+          if gh release view "v${version}" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            build=false
+            echo "v${version} is already published here; nothing to do" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ needs.check.outputs.version }}
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - name: Check out this fork's Linux changes
+        uses: actions/checkout@v4
+        with:
+          path: fork
+
+      - name: Check out upstream at the release
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ needs.check.outputs.tag }}
+          path: src
+
+      - name: Apply the Linux changes
+        run: python3 fork/linux/apply.py src
+
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev libasound2-dev libpipewire-0.3-dev libspa-0.2-dev libxdo-dev \
+            patchelf clang cmake pkg-config xdotool
+
+      - name: Rust, as upstream pins it
+        working-directory: src
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: linux-desktop-cargo-${{ hashFiles('src/Cargo.lock') }}
+          restore-keys: linux-desktop-cargo-
+
+      - name: Tauri CLI, the version upstream builds with
+        working-directory: src
+        run: |
+          set -euo pipefail
+          v=$(grep -rhoE 'TAURI_CLI_VERSION: *"[0-9.]+"' .github/workflows | head -1 | grep -oE '[0-9.]+' || true)
+          if [ -n "$v" ] && [ -x .github/scripts/install-tauri-cli.sh ]; then
+            .github/scripts/install-tauri-cli.sh "$v"
+          else
+            cargo install tauri-cli --locked ${v:+--version "$v"}
+          fi
+
+      - name: The fork's own unit tests
+        working-directory: src
+        run: cargo test -p minutes-app --features parakeet linux_chrome
+
+      - name: Build the .deb
+        working-directory: src/tauri/src-tauri
+        env:
+          CARGO_NET_RETRY: 3
+        run: cargo tauri build --features parakeet --ci --bundles deb --no-sign --config "{\"version\":\"${VERSION}\"}"
+
+      - name: Collect the package
+        id: pkg
+        run: |
+          set -euo pipefail
+          deb=$(ls src/target/release/bundle/deb/*.deb)
+          [ "$(echo "$deb" | wc -l)" = 1 ] || { echo "::error::expected one .deb, found: $deb"; exit 1; }
+          out="Minutes_${VERSION}_amd64.deb"
+          mkdir dist && cp "$deb" "dist/$out"
+          (cd dist && sha256sum "$out" > "$out.sha256")
+          dpkg-deb --info "dist/$out" | sed -n '1,25p'
+          [ "$(dpkg-deb -f "dist/$out" Version)" = "$VERSION" ]
+          echo "name=$out" >> "$GITHUB_OUTPUT"
+
+      - name: Keep the package with the run
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: dist/*
+          retention-days: 14
+
+      - name: Publish the release
+        if: github.event_name == 'schedule' || inputs.publish
+        run: |
+          set -euo pipefail
+          cat > notes.md <<NOTES
+          Linux desktop build of Minutes ${TAG}, made automatically from upstream's release with the changes in [\`linux/\`](https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_REF_NAME}/linux).
+
+          Upstream ships the desktop app for macOS and Windows only; Linux gets the CLI. This is the same Tauri desktop app built for x86_64 Linux (Ubuntu 24.04, WebKitGTK 4.1), with:
+          - a real "Minutes" window title,
+          - a stock GNOME window frame (\`GTK_THEME\` pinned for the app's own process to adw-gtk3 / adw-gtk3-dark when installed, else Adwaita; an exported \`GTK_THEME\` still wins),
+          - no in-window menu bar; every item is in the tray menu.
+
+          Asset: \`Minutes_${VERSION}_amd64.deb\` (package \`minutes\`, binary \`/usr/bin/minutes-app\`).
+
+          Upstream's notes for this version: https://github.com/${UPSTREAM}/releases/tag/${TAG}
+          NOTES
+          sed -i 's/^          //' notes.md
+          gh release create "v${VERSION}" dist/* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Minutes ${TAG#v} for Linux (desktop app)" --notes-file notes.md --latest
